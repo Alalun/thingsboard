@@ -1,5 +1,5 @@
 /**
- * Copyright © 2016-2019 The Thingsboard Authors
+ * Copyright © 2016-2020 The Thingsboard Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,16 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.thingsboard.server.actors.service.ActorService;
-import org.thingsboard.server.common.data.*;
+import org.thingsboard.server.common.data.Customer;
+import org.thingsboard.server.common.data.Dashboard;
+import org.thingsboard.server.common.data.DashboardInfo;
+import org.thingsboard.server.common.data.DataConstants;
+import org.thingsboard.server.common.data.Device;
+import org.thingsboard.server.common.data.EntityType;
+import org.thingsboard.server.common.data.EntityView;
+import org.thingsboard.server.common.data.HasName;
+import org.thingsboard.server.common.data.Tenant;
+import org.thingsboard.server.common.data.User;
 import org.thingsboard.server.common.data.alarm.Alarm;
 import org.thingsboard.server.common.data.alarm.AlarmId;
 import org.thingsboard.server.common.data.alarm.AlarmInfo;
@@ -36,7 +45,19 @@ import org.thingsboard.server.common.data.asset.Asset;
 import org.thingsboard.server.common.data.audit.ActionType;
 import org.thingsboard.server.common.data.exception.ThingsboardErrorCode;
 import org.thingsboard.server.common.data.exception.ThingsboardException;
-import org.thingsboard.server.common.data.id.*;
+import org.thingsboard.server.common.data.id.AssetId;
+import org.thingsboard.server.common.data.id.CustomerId;
+import org.thingsboard.server.common.data.id.DashboardId;
+import org.thingsboard.server.common.data.id.DeviceId;
+import org.thingsboard.server.common.data.id.EntityId;
+import org.thingsboard.server.common.data.id.EntityIdFactory;
+import org.thingsboard.server.common.data.id.EntityViewId;
+import org.thingsboard.server.common.data.id.RuleChainId;
+import org.thingsboard.server.common.data.id.RuleNodeId;
+import org.thingsboard.server.common.data.id.TenantId;
+import org.thingsboard.server.common.data.id.UserId;
+import org.thingsboard.server.common.data.id.WidgetTypeId;
+import org.thingsboard.server.common.data.id.WidgetsBundleId;
 import org.thingsboard.server.common.data.kv.AttributeKvEntry;
 import org.thingsboard.server.common.data.kv.DataType;
 import org.thingsboard.server.common.data.page.TextPageLink;
@@ -45,7 +66,6 @@ import org.thingsboard.server.common.data.plugin.ComponentDescriptor;
 import org.thingsboard.server.common.data.plugin.ComponentType;
 import org.thingsboard.server.common.data.rule.RuleChain;
 import org.thingsboard.server.common.data.rule.RuleNode;
-import org.thingsboard.server.common.data.security.Authority;
 import org.thingsboard.server.common.data.widget.WidgetType;
 import org.thingsboard.server.common.data.widget.WidgetsBundle;
 import org.thingsboard.server.common.msg.TbMsg;
@@ -53,13 +73,13 @@ import org.thingsboard.server.common.msg.TbMsgDataType;
 import org.thingsboard.server.common.msg.TbMsgMetaData;
 import org.thingsboard.server.common.msg.cluster.SendToClusterMsg;
 import org.thingsboard.server.common.msg.system.ServiceToRuleEngineMsg;
-import org.thingsboard.server.common.msg.tools.TbRateLimitsException;
 import org.thingsboard.server.dao.alarm.AlarmService;
 import org.thingsboard.server.dao.asset.AssetService;
 import org.thingsboard.server.dao.attributes.AttributesService;
 import org.thingsboard.server.dao.audit.AuditLogService;
 import org.thingsboard.server.dao.customer.CustomerService;
 import org.thingsboard.server.dao.dashboard.DashboardService;
+import org.thingsboard.server.dao.device.ClaimDevicesService;
 import org.thingsboard.server.dao.device.DeviceCredentialsService;
 import org.thingsboard.server.dao.device.DeviceService;
 import org.thingsboard.server.dao.entityview.EntityViewService;
@@ -161,6 +181,9 @@ public abstract class BaseController {
 
     @Autowired
     protected AttributesService attributesService;
+
+    @Autowired
+    protected ClaimDevicesService claimDevicesService;
 
     @Value("${server.log_controller_error_stack_trace}")
     @Getter
@@ -493,14 +516,26 @@ public abstract class BaseController {
 
     protected String constructBaseUrl(HttpServletRequest request) {
         String scheme = request.getScheme();
-        if (request.getHeader("x-forwarded-proto") != null) {
-            scheme = request.getHeader("x-forwarded-proto");
+
+        String forwardedProto = request.getHeader("x-forwarded-proto");
+        if (forwardedProto != null) {
+            scheme = forwardedProto;
         }
+
         int serverPort = request.getServerPort();
         if (request.getHeader("x-forwarded-port") != null) {
             try {
                 serverPort = request.getIntHeader("x-forwarded-port");
             } catch (NumberFormatException e) {
+            }
+        } else if (forwardedProto != null) {
+            switch (forwardedProto) {
+                case "http":
+                    serverPort = 80;
+                    break;
+                case "https":
+                    serverPort = 443;
+                    break;
             }
         }
 
@@ -607,6 +642,8 @@ public abstract class BaseController {
                                     entityNode.put(attr.getKey(), attr.getDoubleValue().get());
                                 } else if (attr.getDataType() == DataType.LONG) {
                                     entityNode.put(attr.getKey(), attr.getLongValue().get());
+                                } else if (attr.getDataType() == DataType.JSON) {
+                                    entityNode.set(attr.getKey(), json.readTree(attr.getJsonValue().get()));
                                 } else {
                                     entityNode.put(attr.getKey(), attr.getValueAsString());
                                 }

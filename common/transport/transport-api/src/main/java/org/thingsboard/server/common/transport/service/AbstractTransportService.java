@@ -1,5 +1,5 @@
 /**
- * Copyright © 2016-2019 The Thingsboard Authors
+ * Copyright © 2016-2020 The Thingsboard Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package org.thingsboard.server.common.transport.service;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.thingsboard.common.util.ThingsBoardThreadFactory;
 import org.thingsboard.server.common.data.EntityType;
 import org.thingsboard.server.common.data.id.DeviceId;
 import org.thingsboard.server.common.data.id.TenantId;
@@ -27,6 +28,7 @@ import org.thingsboard.server.common.transport.TransportService;
 import org.thingsboard.server.common.transport.TransportServiceCallback;
 import org.thingsboard.server.gen.transport.TransportProtos;
 
+import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.*;
 
@@ -128,6 +130,12 @@ public abstract class AbstractTransportService implements TransportService {
     }
 
     @Override
+    public void process(TransportProtos.SessionInfoProto sessionInfo, TransportProtos.ClaimDeviceMsg msg,
+                        TransportServiceCallback<Void> callback) {
+        registerClaimingInfo(sessionInfo, msg, callback);
+    }
+
+    @Override
     public void reportActivity(TransportProtos.SessionInfoProto sessionInfo) {
         reportActivityInternal(sessionInfo);
     }
@@ -147,6 +155,8 @@ public abstract class AbstractTransportService implements TransportService {
     protected abstract void doProcess(TransportProtos.SessionInfoProto sessionInfo, TransportProtos.ToDeviceRpcResponseMsg msg, TransportServiceCallback<Void> callback);
 
     protected abstract void doProcess(TransportProtos.SessionInfoProto sessionInfo, TransportProtos.ToServerRpcRequestMsg msg, TransportServiceCallback<Void> callback);
+
+    protected abstract void registerClaimingInfo(TransportProtos.SessionInfoProto sessionInfo, TransportProtos.ClaimDeviceMsg msg, TransportServiceCallback<Void> callback);
 
     private SessionMetaData reportActivityInternal(TransportProtos.SessionInfoProto sessionInfo) {
         UUID sessionId = toId(sessionInfo);
@@ -168,25 +178,47 @@ public abstract class AbstractTransportService implements TransportService {
                 sessions.remove(uuid);
                 sessionMD.getListener().onRemoteSessionCloseCommand(TransportProtos.SessionCloseNotificationProto.getDefaultInstance());
             } else {
-                process(sessionMD.getSessionInfo(), TransportProtos.SubscriptionInfoProto.newBuilder()
-                        .setAttributeSubscription(sessionMD.isSubscribedToAttributes())
-                        .setRpcSubscription(sessionMD.isSubscribedToRPC())
-                        .setLastActivityTime(sessionMD.getLastActivityTime()).build(), null);
+                if (sessionMD.getLastActivityTime() > sessionMD.getLastReportedActivityTime()) {
+                    final long lastActivityTime = sessionMD.getLastActivityTime();
+                    process(sessionMD.getSessionInfo(), TransportProtos.SubscriptionInfoProto.newBuilder()
+                            .setAttributeSubscription(sessionMD.isSubscribedToAttributes())
+                            .setRpcSubscription(sessionMD.isSubscribedToRPC())
+                            .setLastActivityTime(sessionMD.getLastActivityTime()).build(), new TransportServiceCallback<Void>() {
+                        @Override
+                        public void onSuccess(Void msg) {
+                            sessionMD.setLastReportedActivityTime(lastActivityTime);
+                        }
+
+                        @Override
+                        public void onError(Throwable e) {
+                            log.warn("[{}] Failed to report last activity time", uuid, e);
+                        }
+                    });
+                }
             }
         });
     }
 
     @Override
     public void registerSyncSession(TransportProtos.SessionInfoProto sessionInfo, SessionMsgListener listener, long timeout) {
-        sessions.putIfAbsent(toId(sessionInfo), new SessionMetaData(sessionInfo, TransportProtos.SessionType.SYNC, listener));
-        schedulerExecutor.schedule(() -> {
+        SessionMetaData currentSession = new SessionMetaData(sessionInfo, TransportProtos.SessionType.SYNC, listener);
+        sessions.putIfAbsent(toId(sessionInfo), currentSession);
+
+        ScheduledFuture executorFuture = schedulerExecutor.schedule(() -> {
             listener.onRemoteSessionCloseCommand(TransportProtos.SessionCloseNotificationProto.getDefaultInstance());
             deregisterSession(sessionInfo);
         }, timeout, TimeUnit.MILLISECONDS);
+
+        currentSession.setScheduledFuture(executorFuture);
     }
 
     @Override
     public void deregisterSession(TransportProtos.SessionInfoProto sessionInfo) {
+        SessionMetaData currentSession = sessions.get(toId(sessionInfo));
+        if (currentSession != null && currentSession.hasScheduledFuture()) {
+            log.debug("Stopping scheduler to avoid resending response if request has been ack.");
+            currentSession.getScheduledFuture().cancel(false);
+        }
         sessions.remove(toId(sessionInfo));
     }
 
@@ -269,9 +301,9 @@ public abstract class AbstractTransportService implements TransportService {
             new TbRateLimits(perTenantLimitsConf);
             new TbRateLimits(perDevicesLimitsConf);
         }
-        this.schedulerExecutor = Executors.newSingleThreadScheduledExecutor();
+        this.schedulerExecutor = Executors.newSingleThreadScheduledExecutor(ThingsBoardThreadFactory.forName("transport-scheduler"));
         this.transportCallbackExecutor = Executors.newWorkStealingPool(20);
-        this.schedulerExecutor.scheduleAtFixedRate(this::checkInactivityAndReportActivity, sessionReportTimeout, sessionReportTimeout, TimeUnit.MILLISECONDS);
+        this.schedulerExecutor.scheduleAtFixedRate(this::checkInactivityAndReportActivity, new Random().nextInt((int) sessionReportTimeout), sessionReportTimeout, TimeUnit.MILLISECONDS);
     }
 
     public void destroy() {

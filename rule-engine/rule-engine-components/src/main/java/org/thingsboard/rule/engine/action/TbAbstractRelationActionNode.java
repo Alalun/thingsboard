@@ -1,5 +1,5 @@
 /**
- * Copyright © 2016-2019 The Thingsboard Authors
+ * Copyright © 2016-2020 The Thingsboard Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -54,9 +55,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
+import static org.thingsboard.common.util.DonAsynchron.withCallback;
 import static org.thingsboard.rule.engine.api.TbRelationTypes.FAILURE;
 import static org.thingsboard.rule.engine.api.TbRelationTypes.SUCCESS;
-import static org.thingsboard.rule.engine.api.util.DonAsynchron.withCallback;
 
 @Slf4j
 public abstract class TbAbstractRelationActionNode<C extends TbAbstractRelationActionNodeConfiguration> implements TbNode {
@@ -72,8 +73,7 @@ public abstract class TbAbstractRelationActionNode<C extends TbAbstractRelationA
         if (this.config.getEntityCacheExpiration() > 0) {
             cacheBuilder.expireAfterWrite(this.config.getEntityCacheExpiration(), TimeUnit.SECONDS);
         }
-        entityIdCache = cacheBuilder
-                .build(new EntityCacheLoader(ctx, createEntityIfNotExists()));
+        entityIdCache = cacheBuilder.build(new EntityCacheLoader(ctx, createEntityIfNotExists()));
     }
 
     @Override
@@ -87,7 +87,7 @@ public abstract class TbAbstractRelationActionNode<C extends TbAbstractRelationA
     }
 
     protected ListenableFuture<RelationContainer> processEntityRelationAction(TbContext ctx, TbMsg msg) {
-        return Futures.transformAsync(getEntity(ctx, msg), entityContainer -> doProcessEntityRelationAction(ctx, msg, entityContainer));
+        return Futures.transformAsync(getEntity(ctx, msg), entityContainer -> doProcessEntityRelationAction(ctx, msg, entityContainer), MoreExecutors.directExecutor());
     }
 
     protected abstract boolean createEntityIfNotExists();
@@ -137,7 +137,7 @@ public abstract class TbAbstractRelationActionNode<C extends TbAbstractRelationA
         }
     }
 
-    protected String processPattern(TbMsg msg, String pattern){
+    protected String processPattern(TbMsg msg, String pattern) {
         return TbNodeUtils.processPattern(pattern, msg.getMetaData());
     }
 
@@ -187,6 +187,7 @@ public abstract class TbAbstractRelationActionNode<C extends TbAbstractRelationA
                         newDevice.setType(entitykey.getType());
                         newDevice.setTenantId(ctx.getTenantId());
                         Device savedDevice = deviceService.saveDevice(newDevice);
+                        ctx.sendTbMsgToRuleEngine(ctx.deviceCreatedMsg(savedDevice, ctx.getSelfId()));
                         targetEntity.setEntityId(savedDevice.getId());
                     }
                     break;
@@ -201,6 +202,7 @@ public abstract class TbAbstractRelationActionNode<C extends TbAbstractRelationA
                         newAsset.setType(entitykey.getType());
                         newAsset.setTenantId(ctx.getTenantId());
                         Asset savedAsset = assetService.saveAsset(newAsset);
+                        ctx.sendTbMsgToRuleEngine(ctx.assetCreatedMsg(savedAsset, ctx.getSelfId()));
                         targetEntity.setEntityId(savedAsset.getId());
                     }
                     break;
@@ -214,6 +216,7 @@ public abstract class TbAbstractRelationActionNode<C extends TbAbstractRelationA
                         newCustomer.setTitle(entitykey.getEntityName());
                         newCustomer.setTenantId(ctx.getTenantId());
                         Customer savedCustomer = customerService.saveCustomer(newCustomer);
+                        ctx.sendTbMsgToRuleEngine(ctx.customerCreatedMsg(savedCustomer, ctx.getSelfId()));
                         targetEntity.setEntityId(savedCustomer.getId());
                     }
                     break;
